@@ -1,0 +1,6 @@
+{
+  "name": "Kestrel Workspace",
+  "description": "Multi-company task management, department operations, reporting, and team collaboration platform.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

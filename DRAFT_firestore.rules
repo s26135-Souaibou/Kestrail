@@ -1,0 +1,910 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global safety net: deny all access by default
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // -------------------------------------------------------------------------
+    // Core Primitives & Security Helpers
+    // -------------------------------------------------------------------------
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidRoleName(role) {
+      return role in [
+        'Super Administrator',
+        'Company Administrator',
+        'Department Manager',
+        'Team Leader',
+        'Employee',
+        'Visitor'
+      ];
+    }
+
+    function roleDocId(role) {
+      return role == 'Super Administrator' ? 'super_administrator'
+        : role == 'Company Administrator' ? 'company_administrator'
+        : role == 'Department Manager' ? 'department_manager'
+        : role == 'Team Leader' ? 'team_leader'
+        : role == 'Employee' ? 'employee'
+        : 'visitor';
+    }
+
+    function isValidTaskStatus(status) {
+      return status in ['To Do', 'In Progress', 'Under Review', 'Blocked', 'Completed', 'Cancelled'];
+    }
+
+    function isValidPriority(priority) {
+      return priority in ['Low', 'Medium', 'High', 'Urgent'];
+    }
+
+    function isBootstrappingCompany(companyId) {
+      return !exists(/databases/$(database)/documents/companies/$(companyId))
+        && existsAfter(/databases/$(database)/documents/companies/$(companyId))
+        && getAfter(/databases/$(database)/documents/companies/$(companyId)).data.ownerId == request.auth.uid;
+    }
+
+    function isCompanyOwner(companyId) {
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/companies/$(companyId))
+        && get(/databases/$(database)/documents/companies/$(companyId)).data.ownerId == request.auth.uid;
+    }
+
+    function memberDocExists(companyId, uid) {
+      return exists(/databases/$(database)/documents/companies/$(companyId)/members/$(uid));
+    }
+
+    function getMember(companyId, uid) {
+      return get(/databases/$(database)/documents/companies/$(companyId)/members/$(uid)).data;
+    }
+
+    function isActiveCompanyMember(companyId) {
+      return isSignedIn()
+        && memberDocExists(companyId, request.auth.uid)
+        && getMember(companyId, request.auth.uid).status == 'active';
+    }
+
+    function isCompanyAdmin(companyId) {
+      return isCompanyOwner(companyId)
+        || (isActiveCompanyMember(companyId)
+            && (getMember(companyId, request.auth.uid).role == 'Super Administrator'
+                || getMember(companyId, request.auth.uid).role == 'Company Administrator'));
+    }
+
+    function hasPermission(companyId, perm) {
+      return isCompanyOwner(companyId)
+        || (isActiveCompanyMember(companyId)
+            && (getMember(companyId, request.auth.uid).role == 'Super Administrator'
+                || (exists(/databases/$(database)/documents/companies/$(companyId)/roles/$(roleDocId(getMember(companyId, request.auth.uid).role)))
+                    && get(/databases/$(database)/documents/companies/$(companyId)/roles/$(roleDocId(getMember(companyId, request.auth.uid).role))).data.permissions[perm] == true)));
+    }
+
+    function isVisitor(companyId) {
+      return isActiveCompanyMember(companyId)
+        && getMember(companyId, request.auth.uid).role == 'Visitor';
+    }
+
+    // -------------------------------------------------------------------------
+    // Entity Validation Blueprints (Anti-Update-Gap)
+    // -------------------------------------------------------------------------
+
+    function isValidUserProfile(data) {
+      return data.keys().hasAll(['uid', 'email', 'displayName', 'timezone', 'authProviders', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'email', 'displayName', 'photoURL', 'jobTitle', 'phone', 'timezone', 'authProviders', 'activeCompanyId', 'createdAt', 'updatedAt'])
+        && isValidId(data.uid)
+        && data.uid == request.auth.uid
+        && data.email is string && data.email.size() >= 3 && data.email.size() <= 254
+        && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 120
+        && (!('photoURL' in data) || (data.photoURL is string && data.photoURL.size() <= 1000))
+        && (!('jobTitle' in data) || (data.jobTitle is string && data.jobTitle.size() <= 120))
+        && (!('phone' in data) || (data.phone is string && data.phone.size() <= 40))
+        && data.timezone is string && data.timezone.size() >= 1 && data.timezone.size() <= 64
+        && data.authProviders is list && data.authProviders.size() >= 1 && data.authProviders.size() <= 5
+        && data.authProviders[0] is string
+        && (!('activeCompanyId' in data) || (data.activeCompanyId is string && data.activeCompanyId.size() <= 128))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidUserMembership(data, companyId) {
+      return data.keys().hasAll(['companyId', 'companyName', 'role', 'status', 'joinedAt', 'updatedAt'])
+        && data.keys().hasOnly(['companyId', 'companyName', 'role', 'status', 'joinedAt', 'updatedAt'])
+        && isValidId(data.companyId) && data.companyId == companyId
+        && data.companyName is string && data.companyName.size() >= 1 && data.companyName.size() <= 120
+        && isValidRoleName(data.role)
+        && data.status in ['active', 'suspended']
+        && data.joinedAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidNotification(data, userId) {
+      return data.keys().hasAll(['id', 'userId', 'companyId', 'companyName', 'type', 'title', 'message', 'read', 'actorId', 'actorName', 'createdAt'])
+        && data.keys().hasOnly(['id', 'userId', 'companyId', 'companyName', 'type', 'title', 'message', 'entityType', 'entityId', 'read', 'actorId', 'actorName', 'createdAt'])
+        && isValidId(data.id)
+        && isValidId(data.userId) && data.userId == userId
+        && isValidId(data.companyId)
+        && data.companyName is string && data.companyName.size() >= 1 && data.companyName.size() <= 120
+        && data.type in ['assignment', 'status_change', 'deadline', 'overdue', 'mention', 'comment', 'invitation', 'company_update']
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 160
+        && data.message is string && data.message.size() >= 1 && data.message.size() <= 500
+        && (!('entityType' in data) || (data.entityType is string && data.entityType.size() <= 40))
+        && (!('entityId' in data) || (data.entityId is string && data.entityId.size() <= 128))
+        && data.read is bool
+        && isValidId(data.actorId)
+        && data.actorName is string && data.actorName.size() >= 1 && data.actorName.size() <= 120
+        && data.createdAt is timestamp;
+    }
+
+    function isValidCompany(data, companyId) {
+      return data.keys().hasAll(['id', 'name', 'slug', 'timezone', 'ownerId', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'name', 'slug', 'industry', 'timezone', 'website', 'description', 'ownerId', 'createdAt', 'updatedAt'])
+        && isValidId(data.id) && data.id == companyId
+        && data.name is string && data.name.size() >= 2 && data.name.size() <= 120
+        && data.slug is string && data.slug.size() >= 2 && data.slug.size() <= 80 && data.slug.matches('^[a-z0-9\\-]+$')
+        && (!('industry' in data) || (data.industry is string && data.industry.size() <= 80))
+        && data.timezone is string && data.timezone.size() >= 1 && data.timezone.size() <= 64
+        && (!('website' in data) || (data.website is string && data.website.size() <= 300))
+        && (!('description' in data) || (data.description is string && data.description.size() <= 1000))
+        && isValidId(data.ownerId)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidCompanyMember(data, companyId, userId) {
+      return data.keys().hasAll(['userId', 'companyId', 'email', 'displayName', 'role', 'departmentIds', 'allowedProjectIds', 'status', 'joinedAt', 'updatedAt'])
+        && data.keys().hasOnly(['userId', 'companyId', 'email', 'displayName', 'photoURL', 'jobTitle', 'role', 'departmentIds', 'allowedProjectIds', 'status', 'invitationId', 'invitedBy', 'joinedAt', 'updatedAt'])
+        && isValidId(data.userId) && data.userId == userId
+        && isValidId(data.companyId) && data.companyId == companyId
+        && data.email is string && data.email.size() >= 3 && data.email.size() <= 254
+        && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 120
+        && (!('photoURL' in data) || (data.photoURL is string && data.photoURL.size() <= 1000))
+        && (!('jobTitle' in data) || (data.jobTitle is string && data.jobTitle.size() <= 120))
+        && isValidRoleName(data.role)
+        && data.departmentIds is list && data.departmentIds.size() <= 20
+        && (data.departmentIds.size() == 0 || data.departmentIds[0] is string)
+        && data.allowedProjectIds is list && data.allowedProjectIds.size() <= 50
+        && (data.allowedProjectIds.size() == 0 || data.allowedProjectIds[0] is string)
+        && data.status in ['active', 'suspended']
+        && (!('invitationId' in data) || (data.invitationId is string && data.invitationId.size() <= 128))
+        && (!('invitedBy' in data) || (data.invitedBy is string && data.invitedBy.size() <= 128))
+        && data.joinedAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidRolePermissions(perms) {
+      return perms is map
+        && perms.keys().hasAll([
+          'manageCompany', 'manageRoles', 'manageDepartments', 'manageUsers',
+          'inviteUsers', 'inviteVisitors', 'manageProjects', 'createTasks',
+          'assignTasks', 'editTasks', 'deleteTasks', 'viewAllTasks',
+          'createReports', 'viewAllReports', 'commentOnTasks', 'viewAuditLogs'
+        ])
+        && perms.keys().hasOnly([
+          'manageCompany', 'manageRoles', 'manageDepartments', 'manageUsers',
+          'inviteUsers', 'inviteVisitors', 'manageProjects', 'createTasks',
+          'assignTasks', 'editTasks', 'deleteTasks', 'viewAllTasks',
+          'createReports', 'viewAllReports', 'commentOnTasks', 'viewAuditLogs'
+        ])
+        && perms.manageCompany is bool
+        && perms.manageRoles is bool
+        && perms.manageDepartments is bool
+        && perms.manageUsers is bool
+        && perms.inviteUsers is bool
+        && perms.inviteVisitors is bool
+        && perms.manageProjects is bool
+        && perms.createTasks is bool
+        && perms.assignTasks is bool
+        && perms.editTasks is bool
+        && perms.deleteTasks is bool
+        && perms.viewAllTasks is bool
+        && perms.createReports is bool
+        && perms.viewAllReports is bool
+        && perms.commentOnTasks is bool
+        && perms.viewAuditLogs is bool;
+    }
+
+    function isValidCompanyRole(data, companyId, roleId) {
+      return data.keys().hasAll(['id', 'companyId', 'name', 'permissions', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'companyId', 'name', 'description', 'permissions', 'updatedAt'])
+        && data.id is string && data.id == roleId && roleId.matches('^[a-z0-9_]+$')
+        && isValidId(data.companyId) && data.companyId == companyId
+        && isValidRoleName(data.name)
+        && (!('description' in data) || (data.description is string && data.description.size() <= 300))
+        && isValidRolePermissions(data.permissions)
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidDepartment(data, companyId, departmentId) {
+      return data.keys().hasAll(['id', 'companyId', 'name', 'code', 'createdBy', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'companyId', 'name', 'code', 'description', 'managerId', 'managerName', 'createdBy', 'createdAt', 'updatedAt'])
+        && isValidId(data.id) && data.id == departmentId
+        && isValidId(data.companyId) && data.companyId == companyId
+        && data.name is string && data.name.size() >= 1 && data.name.size() <= 100
+        && data.code is string && data.code.size() >= 1 && data.code.size() <= 20
+        && (!('description' in data) || (data.description is string && data.description.size() <= 500))
+        && (!('managerId' in data) || (data.managerId is string && data.managerId.size() <= 128))
+        && (!('managerName' in data) || (data.managerName is string && data.managerName.size() <= 120))
+        && isValidId(data.createdBy)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidProject(data, companyId, projectId) {
+      return data.keys().hasAll(['id', 'companyId', 'name', 'status', 'visitorAccessible', 'createdBy', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'companyId', 'name', 'description', 'departmentId', 'departmentName', 'leadId', 'leadName', 'status', 'startDate', 'targetDate', 'visitorAccessible', 'createdBy', 'createdAt', 'updatedAt'])
+        && isValidId(data.id) && data.id == projectId
+        && isValidId(data.companyId) && data.companyId == companyId
+        && data.name is string && data.name.size() >= 1 && data.name.size() <= 140
+        && (!('description' in data) || (data.description is string && data.description.size() <= 2000))
+        && (!('departmentId' in data) || (data.departmentId is string && data.departmentId.size() <= 128))
+        && (!('departmentName' in data) || (data.departmentName is string && data.departmentName.size() <= 100))
+        && (!('leadId' in data) || (data.leadId is string && data.leadId.size() <= 128))
+        && (!('leadName' in data) || (data.leadName is string && data.leadName.size() <= 120))
+        && data.status in ['Planning', 'Active', 'On Hold', 'Completed', 'Archived']
+        && (!('startDate' in data) || (data.startDate is string && data.startDate.size() <= 40))
+        && (!('targetDate' in data) || (data.targetDate is string && data.targetDate.size() <= 40))
+        && data.visitorAccessible is bool
+        && isValidId(data.createdBy)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidTask(data, companyId, taskId) {
+      return data.keys().hasAll(['id', 'companyId', 'title', 'status', 'priority', 'createdBy', 'subtaskCount', 'completedSubtaskCount', 'tags', 'visitorVisible', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'id', 'companyId', 'title', 'description', 'projectId', 'projectName',
+          'departmentId', 'departmentName', 'assigneeId', 'assigneeName',
+          'createdBy', 'createdByName', 'status', 'priority', 'startDate',
+          'deadline', 'completedAt', 'subtaskCount', 'completedSubtaskCount',
+          'tags', 'visitorVisible', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.id) && data.id == taskId
+        && isValidId(data.companyId) && data.companyId == companyId
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 200
+        && (!('description' in data) || (data.description is string && data.description.size() <= 4000))
+        && (!('projectId' in data) || (data.projectId is string && data.projectId.size() <= 128))
+        && (!('projectName' in data) || (data.projectName is string && data.projectName.size() <= 140))
+        && (!('departmentId' in data) || (data.departmentId is string && data.departmentId.size() <= 128))
+        && (!('departmentName' in data) || (data.departmentName is string && data.departmentName.size() <= 100))
+        && (!('assigneeId' in data) || (data.assigneeId is string && data.assigneeId.size() <= 128))
+        && (!('assigneeName' in data) || (data.assigneeName is string && data.assigneeName.size() <= 120))
+        && isValidId(data.createdBy)
+        && (!('createdByName' in data) || (data.createdByName is string && data.createdByName.size() <= 120))
+        && isValidTaskStatus(data.status)
+        && isValidPriority(data.priority)
+        && (!('startDate' in data) || (data.startDate is string && data.startDate.size() <= 40))
+        && (!('deadline' in data) || (data.deadline is string && data.deadline.size() <= 40))
+        && (!('completedAt' in data) || (data.completedAt is string && data.completedAt.size() <= 40))
+        && data.subtaskCount is int && data.subtaskCount >= 0 && data.subtaskCount <= 500
+        && data.completedSubtaskCount is int && data.completedSubtaskCount >= 0 && data.completedSubtaskCount <= 500
+        && data.tags is list && data.tags.size() <= 10
+        && (data.tags.size() == 0 || data.tags[0] is string)
+        && data.visitorVisible is bool
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidSubtask(data, companyId, taskId, subtaskId) {
+      return data.keys().hasAll(['id', 'taskId', 'companyId', 'title', 'status', 'priority', 'createdBy', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'id', 'taskId', 'companyId', 'title', 'description',
+          'assigneeId', 'assigneeName', 'status', 'priority',
+          'startDate', 'deadline', 'completedAt', 'createdBy', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.id) && data.id == subtaskId
+        && isValidId(data.taskId) && data.taskId == taskId
+        && isValidId(data.companyId) && data.companyId == companyId
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 200
+        && (!('description' in data) || (data.description is string && data.description.size() <= 2000))
+        && (!('assigneeId' in data) || (data.assigneeId is string && data.assigneeId.size() <= 128))
+        && (!('assigneeName' in data) || (data.assigneeName is string && data.assigneeName.size() <= 120))
+        && isValidTaskStatus(data.status)
+        && isValidPriority(data.priority)
+        && (!('startDate' in data) || (data.startDate is string && data.startDate.size() <= 40))
+        && (!('deadline' in data) || (data.deadline is string && data.deadline.size() <= 40))
+        && (!('completedAt' in data) || (data.completedAt is string && data.completedAt.size() <= 40))
+        && isValidId(data.createdBy)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidTaskHistory(data, companyId, taskId, historyId) {
+      return data.keys().hasAll(['id', 'taskId', 'companyId', 'actorId', 'actorName', 'action', 'createdAt'])
+        && data.keys().hasOnly(['id', 'taskId', 'companyId', 'actorId', 'actorName', 'action', 'field', 'oldValue', 'newValue', 'createdAt'])
+        && isValidId(data.id) && data.id == historyId
+        && isValidId(data.taskId) && data.taskId == taskId
+        && isValidId(data.companyId) && data.companyId == companyId
+        && isValidId(data.actorId) && data.actorId == request.auth.uid
+        && data.actorName is string && data.actorName.size() >= 1 && data.actorName.size() <= 120
+        && data.action is string && data.action.size() >= 1 && data.action.size() <= 100
+        && (!('field' in data) || (data.field is string && data.field.size() <= 64))
+        && (!('oldValue' in data) || (data.oldValue is string && data.oldValue.size() <= 500))
+        && (!('newValue' in data) || (data.newValue is string && data.newValue.size() <= 500))
+        && data.createdAt is timestamp;
+    }
+
+    function isValidTaskComment(data, companyId, taskId, commentId) {
+      return data.keys().hasAll(['id', 'taskId', 'companyId', 'authorId', 'authorName', 'body', 'mentions', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'taskId', 'companyId', 'authorId', 'authorName', 'authorRole', 'body', 'parentCommentId', 'mentions', 'mentionNames', 'createdAt', 'updatedAt'])
+        && isValidId(data.id) && data.id == commentId
+        && isValidId(data.taskId) && data.taskId == taskId
+        && isValidId(data.companyId) && data.companyId == companyId
+        && isValidId(data.authorId) && data.authorId == request.auth.uid
+        && data.authorName is string && data.authorName.size() >= 1 && data.authorName.size() <= 120
+        && (!('authorRole' in data) || (data.authorRole is string && data.authorRole.size() <= 64))
+        && data.body is string && data.body.size() >= 1 && data.body.size() <= 2000
+        && (!('parentCommentId' in data) || (data.parentCommentId is string && data.parentCommentId.size() <= 128))
+        && data.mentions is list && data.mentions.size() <= 20
+        && (data.mentions.size() == 0 || data.mentions[0] is string)
+        && (!('mentionNames' in data) || (data.mentionNames is list && data.mentionNames.size() <= 20))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidReport(data, companyId, reportId) {
+      return data.keys().hasAll(['id', 'companyId', 'title', 'authorId', 'authorName', 'results', 'attachmentLinks', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'id', 'companyId', 'title', 'description', 'taskId', 'taskTitle',
+          'departmentId', 'departmentName', 'authorId', 'authorName',
+          'responsibleUserId', 'responsibleUserName', 'taskCompletedAt',
+          'results', 'observations', 'attachmentLinks', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.id) && data.id == reportId
+        && isValidId(data.companyId) && data.companyId == companyId
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 200
+        && (!('description' in data) || (data.description is string && data.description.size() <= 3000))
+        && (!('taskId' in data) || (data.taskId is string && data.taskId.size() <= 128))
+        && (!('taskTitle' in data) || (data.taskTitle is string && data.taskTitle.size() <= 200))
+        && (!('departmentId' in data) || (data.departmentId is string && data.departmentId.size() <= 128))
+        && (!('departmentName' in data) || (data.departmentName is string && data.departmentName.size() <= 100))
+        && isValidId(data.authorId)
+        && data.authorName is string && data.authorName.size() >= 1 && data.authorName.size() <= 120
+        && (!('responsibleUserId' in data) || (data.responsibleUserId is string && data.responsibleUserId.size() <= 128))
+        && (!('responsibleUserName' in data) || (data.responsibleUserName is string && data.responsibleUserName.size() <= 120))
+        && (!('taskCompletedAt' in data) || (data.taskCompletedAt is string && data.taskCompletedAt.size() <= 40))
+        && data.results is string && data.results.size() >= 1 && data.results.size() <= 4000
+        && (!('observations' in data) || (data.observations is string && data.observations.size() <= 3000))
+        && data.attachmentLinks is list && data.attachmentLinks.size() <= 5
+        && (data.attachmentLinks.size() == 0 || data.attachmentLinks[0] is string)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidInvitation(data, invitationId) {
+      return data.keys().hasAll(['id', 'companyId', 'companyName', 'inviteeEmail', 'role', 'departmentIds', 'allowedProjectIds', 'status', 'invitedBy', 'invitedByName', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'companyId', 'companyName', 'inviteeEmail', 'role', 'departmentIds', 'allowedProjectIds', 'status', 'invitedBy', 'invitedByName', 'acceptedByUid', 'expiresAt', 'createdAt', 'updatedAt'])
+        && isValidId(data.id) && data.id == invitationId
+        && isValidId(data.companyId)
+        && data.companyName is string && data.companyName.size() >= 1 && data.companyName.size() <= 120
+        && data.inviteeEmail is string && data.inviteeEmail.size() >= 3 && data.inviteeEmail.size() <= 254
+        && data.role in ['Company Administrator', 'Department Manager', 'Team Leader', 'Employee', 'Visitor']
+        && data.departmentIds is list && data.departmentIds.size() <= 20
+        && (data.departmentIds.size() == 0 || data.departmentIds[0] is string)
+        && data.allowedProjectIds is list && data.allowedProjectIds.size() <= 50
+        && (data.allowedProjectIds.size() == 0 || data.allowedProjectIds[0] is string)
+        && data.status in ['pending', 'accepted', 'revoked']
+        && isValidId(data.invitedBy)
+        && data.invitedByName is string && data.invitedByName.size() >= 1 && data.invitedByName.size() <= 120
+        && (!('acceptedByUid' in data) || (data.acceptedByUid is string && data.acceptedByUid.size() <= 128))
+        && (!('expiresAt' in data) || (data.expiresAt is string && data.expiresAt.size() <= 40))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidAuditLog(data, companyId, logId) {
+      return data.keys().hasAll(['id', 'companyId', 'actorId', 'actorName', 'action', 'resourceType', 'summary', 'source', 'createdAt'])
+        && data.keys().hasOnly(['id', 'companyId', 'actorId', 'actorName', 'actorRole', 'action', 'resourceType', 'resourceId', 'summary', 'source', 'createdAt'])
+        && isValidId(data.id) && data.id == logId
+        && isValidId(data.companyId) && data.companyId == companyId
+        && isValidId(data.actorId) && data.actorId == request.auth.uid
+        && data.actorName is string && data.actorName.size() >= 1 && data.actorName.size() <= 120
+        && (!('actorRole' in data) || (data.actorRole is string && data.actorRole.size() <= 64))
+        && data.action is string && data.action.size() >= 1 && data.action.size() <= 100
+        && data.resourceType is string && data.resourceType.size() >= 1 && data.resourceType.size() <= 64
+        && (!('resourceId' in data) || (data.resourceId is string && data.resourceId.size() <= 128))
+        && data.summary is string && data.summary.size() >= 1 && data.summary.size() <= 500
+        && data.source in ['web_app', 'api_mcp']
+        && data.createdAt is timestamp;
+    }
+
+    function isValidIntegrationConfig(data, companyId, integrationId) {
+      return data.keys().hasAll(['id', 'companyId', 'provider', 'status', 'allowedScopes', 'requireConfirmationForDestructive', 'updatedBy', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'companyId', 'provider', 'status', 'allowedScopes', 'requireConfirmationForDestructive', 'updatedBy', 'updatedAt'])
+        && data.id is string && data.id == integrationId && integrationId.matches('^[a-z0-9_]+$')
+        && isValidId(data.companyId) && data.companyId == companyId
+        && data.provider == 'chatgpt_mcp'
+        && data.status in ['unconfigured', 'revoked']
+        && data.allowedScopes is list && data.allowedScopes.size() <= 20
+        && (data.allowedScopes.size() == 0 || data.allowedScopes[0] is string)
+        && data.requireConfirmationForDestructive is bool
+        && isValidId(data.updatedBy) && data.updatedBy == request.auth.uid
+        && data.updatedAt is timestamp;
+    }
+
+    // -------------------------------------------------------------------------
+    // /users/{userId} - Strictly Owner-Isolated PII & Preferences
+    // -------------------------------------------------------------------------
+
+    match /users/{userId} {
+      allow get: if isValidId(userId) && isOwner(userId);
+      allow list: if isOwner(userId);
+      allow create: if isValidId(userId)
+        && isOwner(userId)
+        && isValidUserProfile(incoming())
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(userId)
+        && isOwner(userId)
+        && isValidUserProfile(incoming())
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'displayName', 'photoURL', 'jobTitle', 'phone', 'timezone',
+          'authProviders', 'activeCompanyId', 'email', 'updatedAt'
+        ]);
+      allow delete: if false;
+
+      match /memberships/{companyId} {
+        allow get: if isValidId(userId) && isValidId(companyId) && isOwner(userId);
+        allow list: if isOwner(userId);
+        allow create: if isValidId(userId) && isValidId(companyId)
+          && isVerifiedUser()
+          && isValidUserMembership(incoming(), companyId)
+          && incoming().joinedAt == request.time
+          && incoming().updatedAt == request.time
+          && (
+            (isOwner(userId) && existsAfter(/databases/$(database)/documents/companies/$(companyId)/members/$(userId)))
+            || hasPermission(companyId, 'manageUsers')
+          );
+        allow update: if isValidId(userId) && isValidId(companyId)
+          && isVerifiedUser()
+          && isValidUserMembership(incoming(), companyId)
+          && incoming().companyId == existing().companyId
+          && incoming().joinedAt == existing().joinedAt
+          && incoming().updatedAt == request.time
+          && (
+            (isOwner(userId) && incoming().diff(existing()).affectedKeys().hasOnly(['companyName', 'updatedAt']))
+            || (hasPermission(companyId, 'manageUsers') && incoming().diff(existing()).affectedKeys().hasOnly(['role', 'status', 'companyName', 'updatedAt']))
+          );
+        allow delete: if isValidId(userId) && isValidId(companyId)
+          && isVerifiedUser()
+          && (isOwner(userId) || hasPermission(companyId, 'manageUsers'));
+      }
+
+      match /notifications/{notificationId} {
+        allow get: if isValidId(userId) && isValidId(notificationId) && isOwner(userId);
+        allow list: if isOwner(userId);
+        allow create: if isValidId(userId) && isValidId(notificationId)
+          && isVerifiedUser()
+          && isValidNotification(incoming(), userId)
+          && incoming().actorId == request.auth.uid
+          && incoming().createdAt == request.time
+          && (isOwner(userId) || isActiveCompanyMember(incoming().companyId));
+        allow update: if isValidId(userId) && isValidId(notificationId)
+          && isOwner(userId)
+          && isValidNotification(incoming(), userId)
+          && incoming().createdAt == existing().createdAt
+          && incoming().diff(existing()).affectedKeys().hasOnly(['read']);
+        allow delete: if isValidId(userId) && isValidId(notificationId) && isOwner(userId);
+      }
+    }
+
+    // -------------------------------------------------------------------------
+    // /invitations/{invitationId}
+    // -------------------------------------------------------------------------
+
+    match /invitations/{invitationId} {
+      allow get: if isValidId(invitationId) && isSignedIn() && (
+        existing().inviteeEmail == request.auth.token.email
+        || existing().invitedBy == request.auth.uid
+        || isActiveCompanyMember(existing().companyId)
+      );
+      allow list: if isSignedIn() && (
+        resource.data.inviteeEmail == request.auth.token.email
+        || resource.data.invitedBy == request.auth.uid
+      );
+      allow create: if isValidId(invitationId)
+        && isVerifiedUser()
+        && isValidInvitation(incoming(), invitationId)
+        && incoming().status == 'pending'
+        && incoming().invitedBy == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && (
+          (incoming().role == 'Visitor' && hasPermission(incoming().companyId, 'inviteVisitors'))
+          || (incoming().role != 'Visitor' && hasPermission(incoming().companyId, 'inviteUsers'))
+        );
+      allow update: if isValidId(invitationId)
+        && isVerifiedUser()
+        && isValidInvitation(incoming(), invitationId)
+        && incoming().id == existing().id
+        && incoming().companyId == existing().companyId
+        && incoming().inviteeEmail == existing().inviteeEmail
+        && incoming().invitedBy == existing().invitedBy
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          // Action 1: Invitee accepts pending invitation
+          (existing().status == 'pending'
+            && existing().inviteeEmail == request.auth.token.email
+            && incoming().status == 'accepted'
+            && incoming().acceptedByUid == request.auth.uid
+            && incoming().role == existing().role
+            && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'acceptedByUid', 'updatedAt']))
+          ||
+          // Action 2: Authorized company member revokes pending invitation
+          (existing().status == 'pending'
+            && incoming().status == 'revoked'
+            && (hasPermission(existing().companyId, 'inviteUsers') || hasPermission(existing().companyId, 'inviteVisitors'))
+            && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']))
+        );
+      allow delete: if isValidId(invitationId)
+        && isVerifiedUser()
+        && hasPermission(existing().companyId, 'manageUsers');
+    }
+
+    // -------------------------------------------------------------------------
+    // /companies/{companyId} - Multi-Tenant Isolated Workspaces
+    // -------------------------------------------------------------------------
+
+    match /companies/{companyId} {
+      allow get: if isValidId(companyId) && isActiveCompanyMember(companyId);
+      allow list: if isSignedIn() && resource.data.ownerId == request.auth.uid;
+      allow create: if isValidId(companyId)
+        && isVerifiedUser()
+        && isValidCompany(incoming(), companyId)
+        && incoming().ownerId == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && existsAfter(/databases/$(database)/documents/companies/$(companyId)/members/$(request.auth.uid));
+      allow update: if isValidId(companyId)
+        && isVerifiedUser()
+        && isValidCompany(incoming(), companyId)
+        && hasPermission(companyId, 'manageCompany')
+        && incoming().id == existing().id
+        && incoming().ownerId == existing().ownerId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'name', 'slug', 'industry', 'timezone', 'website', 'description', 'updatedAt'
+        ]);
+      allow delete: if isValidId(companyId) && isVerifiedUser() && isCompanyOwner(companyId);
+
+      // Members
+      match /members/{userId} {
+        allow get: if isValidId(companyId) && isValidId(userId) && isActiveCompanyMember(companyId);
+        allow list: if isActiveCompanyMember(companyId);
+        allow create: if isValidId(companyId) && isValidId(userId)
+          && isVerifiedUser()
+          && isValidCompanyMember(incoming(), companyId, userId)
+          && incoming().joinedAt == request.time
+          && incoming().updatedAt == request.time
+          && (
+            // Bootstrap initial owner as Super Administrator when creating company
+            (isBootstrappingCompany(companyId)
+              && userId == request.auth.uid
+              && incoming().role == 'Super Administrator'
+              && incoming().status == 'active')
+            ||
+            // Accept valid pending invitation
+            (userId == request.auth.uid
+              && ('invitationId' in incoming())
+              && isValidId(incoming().invitationId)
+              && exists(/databases/$(database)/documents/invitations/$(incoming().invitationId))
+              && get(/databases/$(database)/documents/invitations/$(incoming().invitationId)).data.status == 'pending'
+              && get(/databases/$(database)/documents/invitations/$(incoming().invitationId)).data.companyId == companyId
+              && get(/databases/$(database)/documents/invitations/$(incoming().invitationId)).data.inviteeEmail == request.auth.token.email
+              && get(/databases/$(database)/documents/invitations/$(incoming().invitationId)).data.role == incoming().role
+              && incoming().status == 'active')
+          );
+        allow update: if isValidId(companyId) && isValidId(userId)
+          && isVerifiedUser()
+          && isValidCompanyMember(incoming(), companyId, userId)
+          && incoming().userId == existing().userId
+          && incoming().companyId == existing().companyId
+          && incoming().joinedAt == existing().joinedAt
+          && incoming().updatedAt == request.time
+          && (
+            // Tier 1: User manager updates role, departments, visitor projects, or status (cannot demote company owner)
+            (hasPermission(companyId, 'manageUsers')
+              && !(userId == get(/databases/$(database)/documents/companies/$(companyId)).data.ownerId && incoming().role != 'Super Administrator')
+              && incoming().diff(existing()).affectedKeys().hasOnly(['role', 'departmentIds', 'allowedProjectIds', 'status', 'jobTitle', 'displayName', 'updatedAt']))
+            ||
+            // Tier 2: Member updates own non-privilege profile fields
+            (userId == request.auth.uid
+              && isActiveCompanyMember(companyId)
+              && incoming().role == existing().role
+              && incoming().status == existing().status
+              && incoming().departmentIds == existing().departmentIds
+              && incoming().allowedProjectIds == existing().allowedProjectIds
+              && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoURL', 'jobTitle', 'email', 'updatedAt']))
+          );
+        allow delete: if isValidId(companyId) && isValidId(userId)
+          && isVerifiedUser()
+          && hasPermission(companyId, 'manageUsers')
+          && userId != get(/databases/$(database)/documents/companies/$(companyId)).data.ownerId;
+      }
+
+      // Configurable Roles
+      match /roles/{roleId} {
+        allow get: if isValidId(companyId) && roleId.matches('^[a-z0-9_]+$') && isActiveCompanyMember(companyId);
+        allow list: if isActiveCompanyMember(companyId);
+        allow create: if isValidId(companyId) && roleId.matches('^[a-z0-9_]+$')
+          && isVerifiedUser()
+          && isValidCompanyRole(incoming(), companyId, roleId)
+          && incoming().updatedAt == request.time
+          && (isBootstrappingCompany(companyId) || hasPermission(companyId, 'manageRoles'));
+        allow update: if isValidId(companyId) && roleId.matches('^[a-z0-9_]+$')
+          && isVerifiedUser()
+          && isValidCompanyRole(incoming(), companyId, roleId)
+          && hasPermission(companyId, 'manageRoles')
+          && incoming().id == existing().id
+          && incoming().companyId == existing().companyId
+          && incoming().name == existing().name
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly(['permissions', 'description', 'updatedAt']);
+        allow delete: if false;
+      }
+
+      // Departments
+      match /departments/{departmentId} {
+        allow get: if isValidId(companyId) && isValidId(departmentId) && isActiveCompanyMember(companyId);
+        allow list: if isActiveCompanyMember(companyId);
+        allow create: if isValidId(companyId) && isValidId(departmentId)
+          && isVerifiedUser()
+          && isValidDepartment(incoming(), companyId, departmentId)
+          && incoming().createdBy == request.auth.uid
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && (isBootstrappingCompany(companyId) || hasPermission(companyId, 'manageDepartments'));
+        allow update: if isValidId(companyId) && isValidId(departmentId)
+          && isVerifiedUser()
+          && isValidDepartment(incoming(), companyId, departmentId)
+          && hasPermission(companyId, 'manageDepartments')
+          && incoming().id == existing().id
+          && incoming().companyId == existing().companyId
+          && incoming().createdBy == existing().createdBy
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'code', 'description', 'managerId', 'managerName', 'updatedAt']);
+        allow delete: if isValidId(companyId) && isValidId(departmentId)
+          && isVerifiedUser()
+          && hasPermission(companyId, 'manageDepartments');
+      }
+
+      // Projects
+      match /projects/{projectId} {
+        allow get: if isValidId(companyId) && isValidId(projectId) && isActiveCompanyMember(companyId)
+          && (!isVisitor(companyId) || existing().visitorAccessible == true || projectId in getMember(companyId, request.auth.uid).allowedProjectIds);
+        allow list: if isActiveCompanyMember(companyId)
+          && (!isVisitor(companyId) || resource.data.visitorAccessible == true);
+        allow create: if isValidId(companyId) && isValidId(projectId)
+          && isVerifiedUser()
+          && isValidProject(incoming(), companyId, projectId)
+          && incoming().createdBy == request.auth.uid
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && hasPermission(companyId, 'manageProjects');
+        allow update: if isValidId(companyId) && isValidId(projectId)
+          && isVerifiedUser()
+          && isValidProject(incoming(), companyId, projectId)
+          && hasPermission(companyId, 'manageProjects')
+          && incoming().id == existing().id
+          && incoming().companyId == existing().companyId
+          && incoming().createdBy == existing().createdBy
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'name', 'description', 'departmentId', 'departmentName', 'leadId',
+            'leadName', 'status', 'startDate', 'targetDate', 'visitorAccessible', 'updatedAt'
+          ]);
+        allow delete: if isValidId(companyId) && isValidId(projectId)
+          && isVerifiedUser()
+          && hasPermission(companyId, 'manageProjects');
+      }
+
+      // Tasks & Subcollections
+      match /tasks/{taskId} {
+        allow get: if isValidId(companyId) && isValidId(taskId) && isActiveCompanyMember(companyId)
+          && (!isVisitor(companyId) || existing().visitorVisible == true || existing().assigneeId == request.auth.uid);
+        allow list: if isActiveCompanyMember(companyId)
+          && (!isVisitor(companyId) || resource.data.visitorVisible == true || resource.data.assigneeId == request.auth.uid);
+        allow create: if isValidId(companyId) && isValidId(taskId)
+          && isVerifiedUser()
+          && isValidTask(incoming(), companyId, taskId)
+          && incoming().createdBy == request.auth.uid
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && hasPermission(companyId, 'createTasks');
+        allow update: if isValidId(companyId) && isValidId(taskId)
+          && isVerifiedUser()
+          && isValidTask(incoming(), companyId, taskId)
+          && incoming().id == existing().id
+          && incoming().companyId == existing().companyId
+          && incoming().createdBy == existing().createdBy
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && (
+            // Tier 1: Full Task Editors / Admins (can also reopen or edit completed tasks)
+            (hasPermission(companyId, 'editTasks')
+              && incoming().diff(existing()).affectedKeys().hasOnly([
+                'title', 'description', 'projectId', 'projectName', 'departmentId',
+                'departmentName', 'assigneeId', 'assigneeName', 'status', 'priority',
+                'startDate', 'deadline', 'completedAt', 'subtaskCount',
+                'completedSubtaskCount', 'tags', 'visitorVisible', 'updatedAt'
+              ]))
+            ||
+            // Tier 2: Assignee updating status or subtask progress counters on non-terminal tasks
+            (isActiveCompanyMember(companyId)
+              && existing().assigneeId == request.auth.uid
+              && existing().status != 'Completed'
+              && existing().status != 'Cancelled'
+              && incoming().diff(existing()).affectedKeys().hasOnly([
+                'status', 'completedAt', 'subtaskCount', 'completedSubtaskCount', 'updatedAt'
+              ]))
+          );
+        allow delete: if isValidId(companyId) && isValidId(taskId)
+          && isVerifiedUser()
+          && hasPermission(companyId, 'deleteTasks');
+
+        // Subtasks
+        match /subtasks/{subtaskId} {
+          allow get: if isValidId(companyId) && isValidId(taskId) && isValidId(subtaskId) && isActiveCompanyMember(companyId);
+          allow list: if isActiveCompanyMember(companyId);
+          allow create: if isValidId(companyId) && isValidId(taskId) && isValidId(subtaskId)
+            && isVerifiedUser()
+            && isValidSubtask(incoming(), companyId, taskId, subtaskId)
+            && incoming().createdBy == request.auth.uid
+            && incoming().createdAt == request.time
+            && incoming().updatedAt == request.time
+            && exists(/databases/$(database)/documents/companies/$(companyId)/tasks/$(taskId))
+            && (hasPermission(companyId, 'createTasks') || hasPermission(companyId, 'editTasks'));
+          allow update: if isValidId(companyId) && isValidId(taskId) && isValidId(subtaskId)
+            && isVerifiedUser()
+            && isValidSubtask(incoming(), companyId, taskId, subtaskId)
+            && incoming().id == existing().id
+            && incoming().taskId == existing().taskId
+            && incoming().companyId == existing().companyId
+            && incoming().createdBy == existing().createdBy
+            && incoming().createdAt == existing().createdAt
+            && incoming().updatedAt == request.time
+            && (
+              (hasPermission(companyId, 'editTasks')
+                && incoming().diff(existing()).affectedKeys().hasOnly([
+                  'title', 'description', 'assigneeId', 'assigneeName', 'status',
+                  'priority', 'startDate', 'deadline', 'completedAt', 'updatedAt'
+                ]))
+              ||
+              (isActiveCompanyMember(companyId)
+                && existing().assigneeId == request.auth.uid
+                && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'completedAt', 'updatedAt']))
+            );
+          allow delete: if isValidId(companyId) && isValidId(taskId) && isValidId(subtaskId)
+            && isVerifiedUser()
+            && (hasPermission(companyId, 'deleteTasks') || hasPermission(companyId, 'editTasks'));
+        }
+
+        // Task History (Immutable Append-Only)
+        match /history/{historyId} {
+          allow get: if isValidId(companyId) && isValidId(taskId) && isValidId(historyId) && isActiveCompanyMember(companyId);
+          allow list: if isActiveCompanyMember(companyId);
+          allow create: if isValidId(companyId) && isValidId(taskId) && isValidId(historyId)
+            && isVerifiedUser()
+            && isValidTaskHistory(incoming(), companyId, taskId, historyId)
+            && incoming().createdAt == request.time
+            && isActiveCompanyMember(companyId);
+          allow update, delete: if false;
+        }
+
+        // Task Comments
+        match /comments/{commentId} {
+          allow get: if isValidId(companyId) && isValidId(taskId) && isValidId(commentId) && isActiveCompanyMember(companyId);
+          allow list: if isActiveCompanyMember(companyId);
+          allow create: if isValidId(companyId) && isValidId(taskId) && isValidId(commentId)
+            && isVerifiedUser()
+            && isValidTaskComment(incoming(), companyId, taskId, commentId)
+            && incoming().createdAt == request.time
+            && incoming().updatedAt == request.time
+            && hasPermission(companyId, 'commentOnTasks');
+          allow update: if isValidId(companyId) && isValidId(taskId) && isValidId(commentId)
+            && isVerifiedUser()
+            && isValidTaskComment(incoming(), companyId, taskId, commentId)
+            && existing().authorId == request.auth.uid
+            && incoming().id == existing().id
+            && incoming().taskId == existing().taskId
+            && incoming().companyId == existing().companyId
+            && incoming().authorId == existing().authorId
+            && incoming().createdAt == existing().createdAt
+            && incoming().updatedAt == request.time
+            && incoming().diff(existing()).affectedKeys().hasOnly(['body', 'mentions', 'mentionNames', 'updatedAt']);
+          allow delete: if isValidId(companyId) && isValidId(taskId) && isValidId(commentId)
+            && isVerifiedUser()
+            && (existing().authorId == request.auth.uid || isCompanyAdmin(companyId));
+        }
+      }
+
+      // Reports
+      match /reports/{reportId} {
+        allow get: if isValidId(companyId) && isValidId(reportId) && isActiveCompanyMember(companyId)
+          && (hasPermission(companyId, 'viewAllReports') || existing().authorId == request.auth.uid || existing().responsibleUserId == request.auth.uid);
+        allow list: if isActiveCompanyMember(companyId)
+          && (hasPermission(companyId, 'viewAllReports') || resource.data.authorId == request.auth.uid || resource.data.responsibleUserId == request.auth.uid);
+        allow create: if isValidId(companyId) && isValidId(reportId)
+          && isVerifiedUser()
+          && isValidReport(incoming(), companyId, reportId)
+          && incoming().authorId == request.auth.uid
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && hasPermission(companyId, 'createReports');
+        allow update: if isValidId(companyId) && isValidId(reportId)
+          && isVerifiedUser()
+          && isValidReport(incoming(), companyId, reportId)
+          && (existing().authorId == request.auth.uid || isCompanyAdmin(companyId))
+          && incoming().id == existing().id
+          && incoming().companyId == existing().companyId
+          && incoming().authorId == existing().authorId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'title', 'description', 'taskId', 'taskTitle', 'departmentId',
+            'departmentName', 'responsibleUserId', 'responsibleUserName',
+            'taskCompletedAt', 'results', 'observations', 'attachmentLinks', 'updatedAt'
+          ]);
+        allow delete: if isValidId(companyId) && isValidId(reportId)
+          && isVerifiedUser()
+          && (existing().authorId == request.auth.uid || isCompanyAdmin(companyId));
+      }
+
+      // Audit Logs (Immutable Append-Only)
+      match /auditLogs/{logId} {
+        allow get: if isValidId(companyId) && isValidId(logId) && hasPermission(companyId, 'viewAuditLogs');
+        allow list: if hasPermission(companyId, 'viewAuditLogs');
+        allow create: if isValidId(companyId) && isValidId(logId)
+          && isVerifiedUser()
+          && isValidAuditLog(incoming(), companyId, logId)
+          && incoming().createdAt == request.time
+          && (isBootstrappingCompany(companyId) || isActiveCompanyMember(companyId));
+        allow update, delete: if false;
+      }
+
+      // Integration Readiness Config (ChatGPT MCP Architecture - No Secrets)
+      match /integrations/{integrationId} {
+        allow get: if isValidId(companyId) && integrationId.matches('^[a-z0-9_]+$') && isCompanyAdmin(companyId);
+        allow list: if isCompanyAdmin(companyId);
+        allow create, update: if isValidId(companyId) && integrationId.matches('^[a-z0-9_]+$')
+          && isVerifiedUser()
+          && isValidIntegrationConfig(incoming(), companyId, integrationId)
+          && hasPermission(companyId, 'manageCompany')
+          && incoming().updatedAt == request.time;
+        allow delete: if false;
+      }
+    }
+  }
+}

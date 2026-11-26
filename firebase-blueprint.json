@@ -1,0 +1,394 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Private user account profile isolated per user UID.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "format": "email", "minLength": 3, "maxLength": 254 },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "photoURL": { "type": "string", "maxLength": 1000 },
+        "jobTitle": { "type": "string", "maxLength": 120 },
+        "phone": { "type": "string", "maxLength": 40 },
+        "timezone": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "authProviders": { "type": "array", "description": "Linked Firebase Auth providers (max 5)." },
+        "activeCompanyId": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "displayName", "timezone", "authProviders", "createdAt", "updatedAt"]
+    },
+    "UserMembership": {
+      "title": "UserMembership",
+      "description": "User-scoped index of companies the user belongs to.",
+      "type": "object",
+      "properties": {
+        "companyId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "companyName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "role": { "type": "string", "enum": ["Super Administrator", "Company Administrator", "Department Manager", "Team Leader", "Employee", "Visitor"] },
+        "status": { "type": "string", "enum": ["active", "suspended"] },
+        "joinedAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["companyId", "companyName", "role", "status", "joinedAt", "updatedAt"]
+    },
+    "Company": {
+      "title": "Company",
+      "description": "Tenant organization entity with isolated workspace data.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "minLength": 2, "maxLength": 120 },
+        "slug": { "type": "string", "minLength": 2, "maxLength": 80, "pattern": "^[a-z0-9\\-]+$" },
+        "industry": { "type": "string", "maxLength": 80 },
+        "timezone": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "website": { "type": "string", "maxLength": 300 },
+        "description": { "type": "string", "maxLength": 1000 },
+        "ownerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "name", "slug", "timezone", "ownerId", "createdAt", "updatedAt"]
+    },
+    "CompanyMember": {
+      "title": "CompanyMember",
+      "description": "Company-scoped membership, role, and department assignment.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "companyId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "format": "email", "minLength": 3, "maxLength": 254 },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "photoURL": { "type": "string", "maxLength": 1000 },
+        "jobTitle": { "type": "string", "maxLength": 120 },
+        "role": { "type": "string", "enum": ["Super Administrator", "Company Administrator", "Department Manager", "Team Leader", "Employee", "Visitor"] },
+        "departmentIds": { "type": "array", "description": "Assigned department IDs (max 20)." },
+        "allowedProjectIds": { "type": "array", "description": "Allowed project IDs for Visitor access (max 50)." },
+        "status": { "type": "string", "enum": ["active", "suspended"] },
+        "invitationId": { "type": "string", "maxLength": 128 },
+        "invitedBy": { "type": "string", "maxLength": 128 },
+        "joinedAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "companyId", "email", "displayName", "role", "departmentIds", "allowedProjectIds", "status", "joinedAt", "updatedAt"]
+    },
+    "CompanyRole": {
+      "title": "CompanyRole",
+      "description": "Configurable RBAC permission policy for a role within a company.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z0-9_]+$" },
+        "companyId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "enum": ["Super Administrator", "Company Administrator", "Department Manager", "Team Leader", "Employee", "Visitor"] },
+        "description": { "type": "string", "maxLength": 300 },
+        "permissions": { "type": "object" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "companyId", "name", "permissions", "updatedAt"]
+    },
+    "Department": {
+      "title": "Department",
+      "description": "Organizational department inside a company.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "companyId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "code": { "type": "string", "minLength": 1, "maxLength": 20 },
+        "description": { "type": "string", "maxLength": 500 },
+        "managerId": { "type": "string", "maxLength": 128 },
+        "managerName": { "type": "string", "maxLength": 120 },
+        "createdBy": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "companyId", "name", "code", "createdBy", "createdAt", "updatedAt"]
+    },
+    "Project": {
+      "title": "Project",
+      "description": "Company project grouping tasks and milestones.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "companyId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 140 },
+        "description": { "type": "string", "maxLength": 2000 },
+        "departmentId": { "type": "string", "maxLength": 128 },
+        "departmentName": { "type": "string", "maxLength": 100 },
+        "leadId": { "type": "string", "maxLength": 128 },
+        "leadName": { "type": "string", "maxLength": 120 },
+        "status": { "type": "string", "enum": ["Planning", "Active", "On Hold", "Completed", "Archived"] },
+        "startDate": { "type": "string", "maxLength": 40 },
+        "targetDate": { "type": "string", "maxLength": 40 },
+        "visitorAccessible": { "type": "boolean" },
+        "createdBy": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "companyId", "name", "status", "visitorAccessible", "createdBy", "createdAt", "updatedAt"]
+    },
+    "Task": {
+      "title": "Task",
+      "description": "Company task with assignee, department, dates, status, and priority.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "companyId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "description": { "type": "string", "maxLength": 4000 },
+        "projectId": { "type": "string", "maxLength": 128 },
+        "projectName": { "type": "string", "maxLength": 140 },
+        "departmentId": { "type": "string", "maxLength": 128 },
+        "departmentName": { "type": "string", "maxLength": 100 },
+        "assigneeId": { "type": "string", "maxLength": 128 },
+        "assigneeName": { "type": "string", "maxLength": 120 },
+        "createdBy": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "createdByName": { "type": "string", "maxLength": 120 },
+        "status": { "type": "string", "enum": ["To Do", "In Progress", "Under Review", "Blocked", "Completed", "Cancelled"] },
+        "priority": { "type": "string", "enum": ["Low", "Medium", "High", "Urgent"] },
+        "startDate": { "type": "string", "maxLength": 40 },
+        "deadline": { "type": "string", "maxLength": 40 },
+        "completedAt": { "type": "string", "maxLength": 40 },
+        "subtaskCount": { "type": "number" },
+        "completedSubtaskCount": { "type": "number" },
+        "tags": { "type": "array", "description": "Task tags (max 10)." },
+        "visitorVisible": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "companyId", "title", "status", "priority", "createdBy", "subtaskCount", "completedSubtaskCount", "tags", "visitorVisible", "createdAt", "updatedAt"]
+    },
+    "Subtask": {
+      "title": "Subtask",
+      "description": "Subtask belonging to a parent task with independent schedule and assignee.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "taskId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "companyId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "description": { "type": "string", "maxLength": 2000 },
+        "assigneeId": { "type": "string", "maxLength": 128 },
+        "assigneeName": { "type": "string", "maxLength": 120 },
+        "status": { "type": "string", "enum": ["To Do", "In Progress", "Under Review", "Blocked", "Completed", "Cancelled"] },
+        "priority": { "type": "string", "enum": ["Low", "Medium", "High", "Urgent"] },
+        "startDate": { "type": "string", "maxLength": 40 },
+        "deadline": { "type": "string", "maxLength": 40 },
+        "completedAt": { "type": "string", "maxLength": 40 },
+        "createdBy": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "taskId", "companyId", "title", "status", "priority", "createdBy", "createdAt", "updatedAt"]
+    },
+    "TaskHistory": {
+      "title": "TaskHistory",
+      "description": "Immutable history entry for task changes.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "taskId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "companyId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "actorId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "actorName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "action": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "field": { "type": "string", "maxLength": 64 },
+        "oldValue": { "type": "string", "maxLength": 500 },
+        "newValue": { "type": "string", "maxLength": 500 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "taskId", "companyId", "actorId", "actorName", "action", "createdAt"]
+    },
+    "TaskComment": {
+      "title": "TaskComment",
+      "description": "Task discussion comment supporting replies and @mentions.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "taskId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "companyId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "authorId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "authorName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "authorRole": { "type": "string", "maxLength": 64 },
+        "body": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "parentCommentId": { "type": "string", "maxLength": 128 },
+        "mentions": { "type": "array", "description": "Mentioned user IDs (max 20)." },
+        "mentionNames": { "type": "array", "description": "Mentioned user display names (max 20)." },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "taskId", "companyId", "authorId", "authorName", "body", "mentions", "createdAt", "updatedAt"]
+    },
+    "Report": {
+      "title": "Report",
+      "description": "Completion report linked to a task and department.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "companyId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "description": { "type": "string", "maxLength": 3000 },
+        "taskId": { "type": "string", "maxLength": 128 },
+        "taskTitle": { "type": "string", "maxLength": 200 },
+        "departmentId": { "type": "string", "maxLength": 128 },
+        "departmentName": { "type": "string", "maxLength": 100 },
+        "authorId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "authorName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "responsibleUserId": { "type": "string", "maxLength": 128 },
+        "responsibleUserName": { "type": "string", "maxLength": 120 },
+        "taskCompletedAt": { "type": "string", "maxLength": 40 },
+        "results": { "type": "string", "minLength": 1, "maxLength": 4000 },
+        "observations": { "type": "string", "maxLength": 3000 },
+        "attachmentLinks": { "type": "array", "description": "Validated attachment links (max 5)." },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "companyId", "title", "authorId", "authorName", "results", "attachmentLinks", "createdAt", "updatedAt"]
+    },
+    "Invitation": {
+      "title": "Invitation",
+      "description": "Company invitation for employees or limited-access visitors.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "companyId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "companyName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "inviteeEmail": { "type": "string", "format": "email", "minLength": 3, "maxLength": 254 },
+        "role": { "type": "string", "enum": ["Company Administrator", "Department Manager", "Team Leader", "Employee", "Visitor"] },
+        "departmentIds": { "type": "array", "description": "Assigned department IDs (max 20)." },
+        "allowedProjectIds": { "type": "array", "description": "Allowed project IDs for Visitor access (max 50)." },
+        "status": { "type": "string", "enum": ["pending", "accepted", "revoked"] },
+        "invitedBy": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "invitedByName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "acceptedByUid": { "type": "string", "maxLength": 128 },
+        "expiresAt": { "type": "string", "maxLength": 40 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "companyId", "companyName", "inviteeEmail", "role", "departmentIds", "allowedProjectIds", "status", "invitedBy", "invitedByName", "createdAt", "updatedAt"]
+    },
+    "Notification": {
+      "title": "Notification",
+      "description": "User-scoped notification item.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "userId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "companyId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "companyName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "type": { "type": "string", "enum": ["assignment", "status_change", "deadline", "overdue", "mention", "comment", "invitation", "company_update"] },
+        "title": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "message": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "entityType": { "type": "string", "maxLength": 40 },
+        "entityId": { "type": "string", "maxLength": 128 },
+        "read": { "type": "boolean" },
+        "actorId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "actorName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "userId", "companyId", "companyName", "type", "title", "message", "read", "actorId", "actorName", "createdAt"]
+    },
+    "AuditLog": {
+      "title": "AuditLog",
+      "description": "Immutable company audit log entry.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "companyId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "actorId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "actorName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "actorRole": { "type": "string", "maxLength": 64 },
+        "action": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "resourceType": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "resourceId": { "type": "string", "maxLength": 128 },
+        "summary": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "source": { "type": "string", "enum": ["web_app", "api_mcp"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "companyId", "actorId", "actorName", "action", "resourceType", "summary", "source", "createdAt"]
+    },
+    "IntegrationConfig": {
+      "title": "IntegrationConfig",
+      "description": "Company integration readiness and revocation metadata (no secrets).",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z0-9_]+$" },
+        "companyId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "provider": { "type": "string", "enum": ["chatgpt_mcp"] },
+        "status": { "type": "string", "enum": ["unconfigured", "revoked"] },
+        "allowedScopes": { "type": "array", "description": "Configured MCP tool scopes (max 20)." },
+        "requireConfirmationForDestructive": { "type": "boolean" },
+        "updatedBy": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "companyId", "provider", "status", "allowedScopes", "requireConfirmationForDestructive", "updatedBy", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Private user profile data readable and writable only by the owning user."
+    },
+    "/users/{userId}/memberships/{companyId}": {
+      "schema": { "$ref": "#/entities/UserMembership" },
+      "description": "User-scoped index of company memberships."
+    },
+    "/users/{userId}/notifications/{notificationId}": {
+      "schema": { "$ref": "#/entities/Notification" },
+      "description": "In-app notifications belonging to a specific user."
+    },
+    "/companies/{companyId}": {
+      "schema": { "$ref": "#/entities/Company" },
+      "description": "Company workspace root document."
+    },
+    "/companies/{companyId}/members/{userId}": {
+      "schema": { "$ref": "#/entities/CompanyMember" },
+      "description": "Company membership, RBAC role, and department scoping."
+    },
+    "/companies/{companyId}/roles/{roleId}": {
+      "schema": { "$ref": "#/entities/CompanyRole" },
+      "description": "Configurable role permissions within the company."
+    },
+    "/companies/{companyId}/departments/{departmentId}": {
+      "schema": { "$ref": "#/entities/Department" },
+      "description": "Company departments."
+    },
+    "/companies/{companyId}/projects/{projectId}": {
+      "schema": { "$ref": "#/entities/Project" },
+      "description": "Company projects."
+    },
+    "/companies/{companyId}/tasks/{taskId}": {
+      "schema": { "$ref": "#/entities/Task" },
+      "description": "Company tasks."
+    },
+    "/companies/{companyId}/tasks/{taskId}/subtasks/{subtaskId}": {
+      "schema": { "$ref": "#/entities/Subtask" },
+      "description": "Subtasks under a task."
+    },
+    "/companies/{companyId}/tasks/{taskId}/history/{historyId}": {
+      "schema": { "$ref": "#/entities/TaskHistory" },
+      "description": "Immutable task change history."
+    },
+    "/companies/{companyId}/tasks/{taskId}/comments/{commentId}": {
+      "schema": { "$ref": "#/entities/TaskComment" },
+      "description": "Comments and @mentions on a task."
+    },
+    "/companies/{companyId}/reports/{reportId}": {
+      "schema": { "$ref": "#/entities/Report" },
+      "description": "Task completion reports."
+    },
+    "/companies/{companyId}/auditLogs/{logId}": {
+      "schema": { "$ref": "#/entities/AuditLog" },
+      "description": "Immutable company security and action audit log."
+    },
+    "/companies/{companyId}/integrations/{integrationId}": {
+      "schema": { "$ref": "#/entities/IntegrationConfig" },
+      "description": "Non-secret integration readiness configuration (e.g. ChatGPT MCP)."
+    },
+    "/invitations/{invitationId}": {
+      "schema": { "$ref": "#/entities/Invitation" },
+      "description": "Company invitations accessible by invitee email or issuing company admins."
+    }
+  }
+}
